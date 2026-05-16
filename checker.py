@@ -1,5 +1,5 @@
 """
-Mega.nz Account Checker v3.0
+Mega.nz Account Checker v3.0 by Thomas Hermes
 ─────────────────────────────
 - Standalone MEGA API client (no mega.py / tenacity)
 - Proxy support (file-based rotation for anti-ban)
@@ -360,7 +360,7 @@ def check_account(
 # ─── Combo parser ─────────────────────────────────────────────
 
 def parse_combo(filepath: str) -> list[tuple[str, str]]:
-    """Parse combo file (email:password or email;password, one per line)."""
+    """Parse combo file (mail:pass or mail;pass, one per line)."""
     pairs = []
     skipped = 0
 
@@ -400,7 +400,7 @@ def print_logo():
     logo = f"""
 {Fore.CYAN}
     ╔══════════════════════════════════════════════════════╗
-    ║          {Fore.WHITE}MEGA.NZ ACCOUNT CHECKER v3.0{Fore.CYAN}              ║
+    ║    {Fore.WHITE}MEGA.NZ ACCOUNT CHECKER v3.0 by Thomas Hermes{Fore.CYAN}     ║
     ╠══════════════════════════════════════════════════════╣
     ║  {Fore.GREEN}• Standalone MEGA API (zero bloat deps){Fore.CYAN}           ║
     ║  {Fore.GREEN}• Proxy rotation (HTTP/SOCKS5){Fore.CYAN}                    ║
@@ -414,7 +414,7 @@ def print_logo():
     except UnicodeEncodeError:
         # Fallback to ASCII logo if UTF-8 is still failing
         print("\n" + "="*54)
-        print("          MEGA.NZ ACCOUNT CHECKER v3.0")
+        print("    MEGA.NZ ACCOUNT CHECKER v3.0 by Thomas Hermes")
         print("="*54)
         print("  * Standalone MEGA API")
         print("  * Proxy rotation")
@@ -454,7 +454,7 @@ def main():
         log_info(f"Created empty {combo_path}")
 
     print(f"\n{'═' * 60}")
-    input(f"\n  Place email:password pairs in {combo_path} and press Enter\n")
+    input(f"\n  Place mail:pass pairs in {combo_path} and press Enter\n")
 
     pairs = parse_combo(combo_path)
     if not pairs:

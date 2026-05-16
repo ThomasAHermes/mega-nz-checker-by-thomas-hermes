@@ -28,7 +28,7 @@ A high-performance, multithreaded account checker for MEGA.nz with full storage 
 
 ## 📖 Usage
 
-1. **Prepare your combo:** Create a `combo.txt` file in the root directory with `email:password` pairs.
+1. **Prepare your combo:** Load your accounts into the `combo.txt` file in `mail:pass` format.
 2. **(Optional) Configure proxies:** Create a `proxies.txt` file with your proxy list.
 3. **Launch the checker:**
    ```bash
