@@ -1,4 +1,4 @@
-# ☁️ MEGA.NZ m:p Checker by ThomasHermes
+# ☁️ MEGA.NZ Checker by ThomasHermes
 
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
@@ -17,8 +17,8 @@ A high-performance, multithreaded account checker for MEGA.nz with full storage 
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/ThomasHermes/MEGA.NZ-Checker.git
-   cd MEGA.NZ-Checker
+   git clone https://github.com/ThomasAHermes/mega-nz-checker-by-thomas-hermes.git
+   cd mega-nz-checker-by-thomas-hermes
    ```
 
 2. **Install dependencies:**
@@ -55,4 +55,4 @@ This tool is for **educational and security testing purposes only**. The develop
 Distributed under the MIT License. See `LICENSE` for more information.
 
 ---
-*Developed with ❤️ by [ThomasHermes](https://github.com/ThomasHermes)*
+*Developed with ❤️ by [ThomasHermes](https://github.com/ThomasAHermes)*
