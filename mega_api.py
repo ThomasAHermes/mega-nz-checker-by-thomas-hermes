@@ -24,7 +24,11 @@ import logging
 import multiprocessing
 import threading
 
-import requests
+import aiohttp
+import asyncio
+import functools
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
 from Crypto.Cipher import AES
 from Crypto.PublicKey import RSA
 
@@ -33,6 +37,12 @@ logger = logging.getLogger(__name__)
 # ─── CPU Throttling ──────────────────────────────────────────
 # Limit concurrent heavy crypto operations (PBKDF2, PoW, Key Prep) 
 # to prevent 100% CPU usage. This ensures the UI remains responsive.
+_process_pool = None
+def get_process_pool():
+    global _process_pool
+    if _process_pool is None:
+        _process_pool = ProcessPoolExecutor(max_workers=max(1, multiprocessing.cpu_count() - 1))
+    return _process_pool
 _crypto_semaphore = threading.Semaphore(max(1, multiprocessing.cpu_count() // 2))
 
 # ─── Error Codes ──────────────────────────────────────────────
@@ -310,6 +320,11 @@ def _solve_hashcash(token: str, easiness: int) -> str:
 
 # ─── MEGA API Client ─────────────────────────────────────────
 
+def _v1_crypto_helper(pwd, eml):
+    p_aes = _prepare_key(_str_to_a32(pwd))
+    u_hash = _stringhash(eml, p_aes)
+    return p_aes, u_hash
+
 class MegaClient:
     """
     Standalone MEGA.nz API client.
@@ -320,76 +335,56 @@ class MegaClient:
     API_URL = "https://g.api.mega.co.nz/cs"
     TIMEOUT = 60
     MAX_RETRIES = 3
-    RETRY_BASE_DELAY = 2  # seconds, multiplied by attempt number
+    RETRY_BASE_DELAY = 2
 
     def __init__(self, proxy: str = None):
-        """
-        Initialize MEGA client.
-
-        Args:
-            proxy: Optional proxy string, e.g.:
-                   'http://user:pass@host:port'
-                   'socks5://user:pass@host:port'
-                   'http://host:port'
-        """
         self.sid = None
         self.master_key = None
         self.sequence_num = random.randint(100000000, 999999999)
         self.request_id = _make_id(10)
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "MEGA/3.0",
-            "Content-Type": "application/json",
-        })
-        # Proxy setup
-        if proxy:
-            proxy = proxy.strip()
-            if proxy:
-                self.session.proxies = {
-                    "http": proxy,
-                    "https": proxy,
-                }
+        self.session = None
+        self.proxy = proxy.strip() if proxy and proxy.strip() else None
 
-    def login(self, email: str, password: str) -> "MegaClient":
-        """
-        Authenticate with MEGA.nz.
-        Supports both v1 (legacy) and v2 (PBKDF2) accounts.
-        """
+    async def _get_session(self):
+        if self.session is None:
+            self.session = aiohttp.ClientSession(headers={
+                "User-Agent": "MEGA/3.0",
+                "Content-Type": "application/json",
+            })
+        return self.session
+
+    async def login(self, email: str, password: str) -> "MegaClient":
         email = email.lower().strip()
 
-        # Step 1: check for salt (v2) or fall back to v1
-        us0_resp = self._api_request({'a': 'us0', 'user': email})
+        us0_resp = await self._api_request({'a': 'us0', 'user': email})
 
         try:
             user_salt = _base64_to_a32(us0_resp['s'])
-            # v2 account — PBKDF2-HMAC-SHA512
-            with _crypto_semaphore:
-                pbkdf2_key = hashlib.pbkdf2_hmac(
-                    hash_name='sha512',
-                    password=password.encode('utf-8'),
-                    salt=_a32_to_str(user_salt),
-                    iterations=100000,
-                    dklen=32
-                )
+            loop = asyncio.get_running_loop()
+            func = functools.partial(
+                hashlib.pbkdf2_hmac,
+                'sha512',
+                password.encode('utf-8'),
+                _a32_to_str(user_salt),
+                100000,
+                32
+            )
+            pbkdf2_key = await loop.run_in_executor(get_process_pool(), func)
             password_aes = _str_to_a32(pbkdf2_key[:16])
             user_hash = _base64_url_encode(pbkdf2_key[-16:])
         except (KeyError, TypeError):
-            # v1 account — custom KDF
-            password_aes = _prepare_key(_str_to_a32(password))
-            user_hash = _stringhash(email, password_aes)
+            loop = asyncio.get_running_loop()
+            password_aes, user_hash = await loop.run_in_executor(get_process_pool(), _v1_crypto_helper, password, email)
 
-        # Step 2: authenticate
-        resp = self._api_request({'a': 'us', 'user': email, 'uh': user_hash})
+        resp = await self._api_request({'a': 'us', 'user': email, 'uh': user_hash})
 
         if isinstance(resp, int):
             self._handle_error_code(resp)
 
-        # Step 3: decrypt session
         self._process_login(resp, password_aes)
         return self
 
     def _process_login(self, resp, password_key):
-        """Decrypt master key and session ID from auth response."""
         encrypted_master_key = _base64_to_a32(resp['k'])
         self.master_key = _decrypt_key(encrypted_master_key, password_key)
 
@@ -425,12 +420,8 @@ class MegaClient:
             sid = binascii.unhexlify('0' + sid if len(sid) % 2 else sid)
             self.sid = _base64_url_encode(sid[:43])
 
-    def get_storage(self) -> dict:
-        """
-        Get account storage info.
-        Returns {'used_gb': float, 'total_gb': float, 'used_bytes': int, 'total_bytes': int}
-        """
-        resp = self._api_request({'a': 'uq', 'xfer': 1, 'strg': 1})
+    async def get_storage(self) -> dict:
+        resp = await self._api_request({'a': 'uq', 'xfer': 1, 'strg': 1})
         used = resp.get('cstrg', 0)
         total = resp.get('mstrg', 0)
         return {
@@ -440,20 +431,14 @@ class MegaClient:
             'total_gb': round(total / 1073741824, 2),
         }
 
-    def get_user(self) -> dict:
-        """Get user info."""
-        return self._api_request({'a': 'ug'})
+    async def get_user(self) -> dict:
+        return await self._api_request({'a': 'ug'})
 
-    def get_files(self) -> dict:
-        """
-        Get file listing for the account.
-        Returns dict {handle: file_info}
-        """
-        files = self._api_request({'a': 'f', 'c': 1, 'r': 1})
+    async def get_files(self) -> dict:
+        files = await self._api_request({'a': 'f', 'c': 1, 'r': 1})
         result = {}
         shared_keys = {}
 
-        # Init shared keys
         if 'ok' in files and 's' in files:
             ok_dict = {}
             for ok_item in files.get('ok', []):
@@ -478,9 +463,8 @@ class MegaClient:
 
         return result
 
-    def get_file_names(self) -> list[str]:
-        """Get list of file names in the account."""
-        files = self.get_files()
+    async def get_file_names(self) -> list:
+        files = await self.get_files()
         names = []
         for _, info in files.items():
             a = info.get('a')
@@ -489,7 +473,6 @@ class MegaClient:
         return names
 
     def _process_file(self, file, shared_keys):
-        """Process a file node from the API response."""
         if file['t'] in (0, 1):
             keys = dict(
                 kp.split(':', 1) for kp in file['k'].split('/')
@@ -524,11 +507,7 @@ class MegaClient:
 
         return file
 
-    def _api_request(self, data):
-        """
-        Send API request with retry logic.
-        Retries on -3 (EAGAIN), -6 (ETOOMANY), -18 (ETEMPUNAVAIL).
-        """
+    async def _api_request(self, data):
         params = {
             'id': self.sequence_num,
             'v': 2,
@@ -540,19 +519,21 @@ class MegaClient:
 
         if not isinstance(data, list):
             data = [data]
+            
+        session = await self._get_session()
 
         for attempt in range(1, self.MAX_RETRIES + 1):
             response = None
             try:
-                response = self.session.post(
+                response = await session.post(
                     self.API_URL,
                     params=params,
                     data=json.dumps(data),
-                    timeout=self.TIMEOUT,
+                    timeout=aiohttp.ClientTimeout(total=self.TIMEOUT),
+                    proxy=self.proxy
                 )
                 
-                # Handle 402 Computational Challenge (Hashcash)
-                if response.status_code == 402:
+                if response.status == 402:
                     challenge = response.headers.get('X-Hashcash')
                     if challenge:
                         logger.debug(f"Solving MEGA Hashcash challenge: {challenge}")
@@ -560,30 +541,29 @@ class MegaClient:
                         if len(parts) >= 4:
                             easiness = int(parts[1])
                             token = parts[3]
-                            solution = _solve_hashcash(token, easiness)
+                            loop = asyncio.get_running_loop()
+                            solution = await loop.run_in_executor(get_process_pool(), _solve_hashcash, token, easiness)
                             # Add solution to headers and retry immediately
-                            self.session.headers['X-Hashcash'] = f"1:{token}:{solution}"
-                            # Clear the error and retry this attempt
+                            # In aiohttp, session headers are shared, we can update them or pass in request
+                            # For simplicity, we just add it to the default headers
+                            session.headers['X-Hashcash'] = f"1:{token}:{solution}"
                             continue
                 
                 response.raise_for_status()
-                json_resp = response.json()
+                json_resp = await response.json()
             except Exception as e:
-                # If we got a 402 but didn't handle it yet (or it failed again)
                 if attempt < self.MAX_RETRIES:
-                    # On some errors, we might want to clear the Hashcash header
-                    if 'X-Hashcash' in self.session.headers:
-                        del self.session.headers['X-Hashcash']
-                    time.sleep(self.RETRY_BASE_DELAY * attempt)
+                    if 'X-Hashcash' in session.headers:
+                        del session.headers['X-Hashcash']
+                    await asyncio.sleep(self.RETRY_BASE_DELAY * attempt)
                     continue
                 
-                # Detailed error reporting
                 code = 'N/A'
                 body = 'N/A'
                 if response is not None:
-                    code = response.status_code
+                    code = response.status
                     try:
-                        body = response.text[:200]
+                        body = (await response.text())[:200]
                     except:
                         body = "<unreadable>"
                 
@@ -593,7 +573,6 @@ class MegaClient:
                 
                 raise MegaError(-1, cause=Exception(err_msg)) from e
 
-            # Parse response
             int_resp = None
             if isinstance(json_resp, list):
                 if len(json_resp) > 0 and isinstance(json_resp[0], int):
@@ -605,11 +584,10 @@ class MegaClient:
                 if int_resp == 0:
                     return int_resp
                 if int_resp in (-3, -6, -18, -19):
-                    # Retry-able errors
                     if attempt < self.MAX_RETRIES:
                         delay = self.RETRY_BASE_DELAY * attempt
                         logger.debug(f"MEGA API error {int_resp}, retry #{attempt} in {delay}s")
-                        time.sleep(delay)
+                        await asyncio.sleep(delay)
                         continue
                 self._handle_error_code(int_resp)
 
@@ -618,8 +596,7 @@ class MegaClient:
         raise MegaError(-1)
 
     def _handle_error_code(self, code: int):
-        """Map MEGA error code to typed exception."""
-        if code in (-2, -9, -5, -14):
+        if code in (-2, -9, -5, -14, -13):
             raise MegaLoginError(code)
         elif code in (-16, -17):
             raise MegaBlockedError(code)
@@ -630,15 +607,12 @@ class MegaClient:
         else:
             raise MegaError(code)
 
-    def close(self):
-        """Close the HTTP session."""
-        try:
-            self.session.close()
-        except Exception:
-            pass
+    async def close(self):
+        if self.session:
+            await self.session.close()
 
-    def __enter__(self):
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, *args):
-        self.close()
+    async def __aexit__(self, *args):
+        await self.close()
