@@ -18,7 +18,7 @@ A high-performance, asynchronous MEGA.nz account validator and storage analyzer.
 - [Key Features](#-key-features)
 - [Project Architecture](#-project-architecture)
 - [Project Structure](#-project-structure)
-- [Prerequisites & Installation](#-prerequisites--installation)
+- [Installation](#-installation)
 - [Usage Guide](#-usage-guide)
 - [Output Files & Data Formats](#-output-files--data-formats)
 - [Console UX & Visual Color Palette](#-console-ux--visual-color-palette)
@@ -90,37 +90,20 @@ mega-nz-checker-by-thomas-hermes/
 
 ---
 
-## 🛠️ Prerequisites & Installation
+## 🛠️ Installation
 
-### Requirements
-- **Python 3.8+** (Python 3.10+ recommended)
-- OS: Windows, Linux, or macOS
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/ThomasAHermes/mega-nz-checker-by-thomas-hermes.git
+   cd mega-nz-checker-by-thomas-hermes
+   ```
 
-### 1. Clone the repository
-```bash
-git clone https://github.com/ThomasAHermes/mega-nz-checker-by-thomas-hermes.git
-cd mega-nz-checker-by-thomas-hermes
-```
+2. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-### 2. (Recommended) Create and activate a virtual environment
-**On Windows (PowerShell):**
-```powershell
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-```
-
-**On Linux / macOS:**
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
-
-### 3. Install dependencies
-```bash
-pip install -r requirements.txt
-```
-
-> **Automated Self-Healing:** `checker.py` includes an automated dependency verification routine on startup. If any required library is missing, it will automatically attempt to install prerequisites before initializing.
+> **⚡ Plug & Play:** `checker.py` also features an automated dependency check on startup. If any required module is missing, it will automatically attempt to install prerequisites via `pip` and restart cleanly.
 
 ---
 
