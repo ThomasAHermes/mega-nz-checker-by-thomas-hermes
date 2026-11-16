@@ -1,3 +1,4 @@
-requests
-pycryptodome
-colorama
+aiohttp>=3.8.0
+pycryptodome>=3.15.0
+colorama>=0.4.5
+requests>=2.28.0

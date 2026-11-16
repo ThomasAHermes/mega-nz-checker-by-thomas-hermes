@@ -1,6 +1,6 @@
 """
 Mega.nz Account Checker v3.0 by Thomas Hermes
-─────────────────────────────
+─────────────────────────────────────────────
 - Standalone asynchronous MEGA API client (no mega.py / tenacity)
 - Asyncio concurrency with semaphore rate limiting
 - Proxy support (file-based round-robin and random rotation for anti-ban)
@@ -13,7 +13,7 @@ Mega.nz Account Checker v3.0 by Thomas Hermes
 - Dual-file export: all hits saved to hits_<name>.txt, premium accounts (> 50 GB) also saved to Hits_Premium.txt
 - Clean hit file formatting without combo row numbers
 
-Dependencies: requests, pycryptodome, colorama, aiohttp
+Dependencies: aiohttp, pycryptodome, colorama
 """
 
 import os
@@ -24,7 +24,7 @@ import importlib.util
 def install_dependencies():
     """Checks and installs missing dependencies."""
     required_libraries = [
-        ("requests", "requests"),
+        ("aiohttp", "aiohttp"),
         ("Crypto", "pycryptodome"),
         ("colorama", "colorama")
     ]
@@ -478,7 +478,7 @@ def print_logo():
     ╠══════════════════════════════════════════════════════╣
     ║  {Fore.GREEN}• Standalone MEGA API (zero bloat deps){Fore.CYAN}           ║
     ║  {Fore.GREEN}• Proxy rotation (HTTP/SOCKS5){Fore.CYAN}                    ║
-    ║  {Fore.GREEN}• Thread-safe multithreading{Fore.CYAN}                      ║
+    ║  {Fore.GREEN}• Asynchronous non-blocking engine{Fore.CYAN}                 ║
     ║  {Fore.GREEN}• Smart retry with backoff{Fore.CYAN}                        ║
     ║  {Fore.GREEN}• Keyword file search{Fore.CYAN}                             ║
     ╚══════════════════════════════════════════════════════╝
@@ -492,7 +492,7 @@ def print_logo():
         print("="*54)
         print("  * Standalone MEGA API")
         print("  * Proxy rotation")
-        print("  * Thread-safe multithreading")
+        print("  * Asynchronous non-blocking engine")
         print("="*54 + "\n")
 
 
