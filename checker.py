@@ -1,15 +1,19 @@
 """
 Mega.nz Account Checker v3.0 by Thomas Hermes
 ─────────────────────────────
-- Standalone MEGA API client (no mega.py / tenacity)
-- Proxy support (file-based rotation for anti-ban)
-- ThreadPoolExecutor with configurable thread count
-- Thread-safe counters and file writing
-- Exponential backoff retry logic
+- Standalone asynchronous MEGA API client (no mega.py / tenacity)
+- Asyncio concurrency with semaphore rate limiting
+- Proxy support (file-based round-robin and random rotation for anti-ban)
+- Thread-safe stats counters and file writing
+- Exponential backoff retry logic for temporary errors and rate limits
 - Graceful error handling with typed exceptions
 - Real-time console title updates via Win32 API
+- Optional file keyword search (omitted from logs and files when not specified)
+- Color-coded console logging: regular hits in green, premium accounts (> 50 GB) in bright pink
+- Dual-file export: all hits saved to hits_<name>.txt, premium accounts (> 50 GB) also saved to Hits_Premium.txt
+- Clean hit file formatting without combo row numbers
 
-Dependencies: requests, pycryptodome, colorama
+Dependencies: requests, pycryptodome, colorama, aiohttp
 """
 
 import os
@@ -160,12 +164,16 @@ class FileWriter:
                 f.write(line + "\n")
 
 
+# Output file for accounts with storage capacity exceeding 50 GB
 PREMIUM_FILEPATH = "Hits_Premium.txt"
 _default_premium_writer = FileWriter(PREMIUM_FILEPATH)
 
 
 def parse_total_gb(total) -> float:
-    """Safely parse total space value into float GB."""
+    """
+    Safely parse total space value into float GB.
+    Supports numeric values as well as strings formatted with 'GB' or 'TB'.
+    """
     if isinstance(total, (int, float)):
         return float(total)
     if isinstance(total, str):
@@ -247,10 +255,18 @@ def _safe_print(msg: str):
         print(msg)
 
 def log_hit(msg: str, is_premium: bool = False):
-    color = Fore.LIGHTMAGENTA_EX if is_premium else Fore.GREEN
-    _safe_print(f"{color}[  HIT   ] {Style.RESET_ALL}{msg}")
+    """
+    Log successful account hit to console.
+    Highlights in bright pink (Fore.LIGHTMAGENTA_EX) if is_premium (> 50 GB total space),
+    otherwise in green (Fore.GREEN).
+    """
+    if is_premium:
+        _safe_print(f"{Fore.LIGHTMAGENTA_EX}[  HIT   ] {Fore.LIGHTMAGENTA_EX}{msg}{Style.RESET_ALL}")
+    else:
+        _safe_print(f"{Fore.GREEN}[  HIT   ] {Style.RESET_ALL}{msg}")
 
 def log_hit_premium(msg: str):
+    """Log premium hit (total space > 50 GB) highlighted in bright pink."""
     log_hit(msg, is_premium=True)
 
 def log_fail(msg: str):
@@ -291,6 +307,23 @@ async def check_account(
     semaphore: asyncio.Semaphore = None,
     premium_writer: FileWriter = None,
 ):
+    """
+    Check a single MEGA account: authenticate, retrieve storage, optionally search keyword.
+
+    Workflow:
+      - Authenticates via MegaClient (using proxy from pool if available).
+      - Retrieves storage metrics (used_gb, total_gb).
+      - If search_string is specified, checks file names for the keyword.
+      - Formats hit lines:
+          * Console: includes [current/total] progress counter.
+          * Output files: clean format without combo row numbers.
+          * Keyword segment is omitted completely if no keyword was specified.
+      - If total space > 50 GB:
+          * Highlights [  HIT   ] in bright pink (Fore.LIGHTMAGENTA_EX).
+          * Appends hit to Hits_Premium.txt in addition to the main hits file.
+      - Handles retries on rate limits (-4) and temporary errors (-3, -6, -18).
+      - Classifies errors into Fail (auth error), Custom (blocked/overquota), or Error.
+    """
     if premium_writer is None:
         premium_writer = _default_premium_writer
 
@@ -485,6 +518,11 @@ def _title_updater(stats: Stats, filename: str, stop: threading.Event):
 # ─── MAIN ─────────────────────────────────────────────────────
 
 async def amain():
+    """
+    Main asynchronous execution entry point.
+    Interactively configures combo path, proxy pool, concurrency limit,
+    output filename, and optional keyword search before running checks.
+    """
     set_title("Mega.nz Checker v3.0 (Async)")
     print_logo()
 

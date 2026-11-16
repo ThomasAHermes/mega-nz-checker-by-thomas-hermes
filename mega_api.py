@@ -1,13 +1,15 @@
 """
 mega_api.py — Standalone MEGA.nz API client.
 No dependency on mega.py, tenacity, or other problematic packages.
-Uses only: requests, pycryptodome, hashlib (stdlib).
+Uses: aiohttp, pycryptodome, hashlib, multiprocessing.
 
 Supports:
-- v1 and v2 MEGA accounts
+- Asynchronous client based on aiohttp and asyncio
+- v1 and v2 MEGA accounts (PBKDF2 HMAC-SHA512 & legacy v1 crypto)
+- Automatic Hashcash (PoW) challenge solver (HTTP 402)
 - Proxy support (HTTP/HTTPS/SOCKS5)
-- Storage and file info retrieval
-- Retry logic with exponential backoff on error -3/-6/-18
+- Storage quota and file info retrieval
+- Retry logic with exponential backoff on errors -3/-6/-18/-19 and rate limits (-4)
 - Typed exceptions for clean error handling
 """
 
@@ -327,9 +329,9 @@ def _v1_crypto_helper(pwd, eml):
 
 class MegaClient:
     """
-    Standalone MEGA.nz API client.
-    Supports authentication, storage info, and file listing.
-    Optional proxy support for avoiding rate limits.
+    Standalone asynchronous MEGA.nz API client.
+    Supports authentication, storage quota info, file listing, and optional proxy rotation.
+    Handles session management and automatic Hashcash PoW challenge solving.
     """
 
     API_URL = "https://g.api.mega.co.nz/cs"
@@ -421,6 +423,10 @@ class MegaClient:
             self.sid = _base64_url_encode(sid[:43])
 
     async def get_storage(self) -> dict:
+        """
+        Retrieve account storage metrics from MEGA API.
+        Returns a dictionary with used_bytes, total_bytes, used_gb, and total_gb.
+        """
         resp = await self._api_request({'a': 'uq', 'xfer': 1, 'strg': 1})
         used = resp.get('cstrg', 0)
         total = resp.get('mstrg', 0)
@@ -464,6 +470,10 @@ class MegaClient:
         return result
 
     async def get_file_names(self) -> list:
+        """
+        Retrieve a list of decrypted file and folder names stored in the account.
+        Used for keyword search.
+        """
         files = await self.get_files()
         names = []
         for _, info in files.items():
