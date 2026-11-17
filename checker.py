@@ -57,6 +57,7 @@ if __name__ == "__main__":
     # If we are being run directly, check dependencies
     install_dependencies()
 
+import re
 import time
 import ctypes
 import random
@@ -470,30 +471,80 @@ def parse_combo(filepath: str) -> list[tuple[str, str]]:
 
 # ─── Logo ─────────────────────────────────────────────────────
 
+_ANSI_ESCAPE_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences to compute visible terminal string length."""
+    return _ANSI_ESCAPE_RE.sub('', text)
+
+
+def generate_banner(use_unicode: bool = True) -> str:
+    """
+    Generate dynamically aligned startup banner.
+    Calculates visible text width (ignoring ANSI color codes) so border boundaries
+    remain strictly aligned across all lines.
+    """
+    border_color = Fore.CYAN
+    title = f"{Style.BRIGHT}{Fore.WHITE}MEGA.NZ ACCOUNT CHECKER v3.0 by Thomas Hermes{Style.RESET_ALL}"
+    link_line = f"{Fore.WHITE}GitHub: {Style.BRIGHT}{Fore.LIGHTCYAN_EX}https://github.com/ThomasAHermes/mega-nz-checker-by-thomas-hermes{Style.RESET_ALL}"
+
+    bullet = f"{Fore.GREEN}•{Style.RESET_ALL}" if use_unicode else "*"
+    features = [
+        f"{bullet} Standalone Async API {Fore.LIGHTBLACK_EX}(zero bloat, native crypto){Style.RESET_ALL}",
+        f"{bullet} Proxy rotation {Fore.LIGHTBLACK_EX}(HTTP / HTTPS / SOCKS5){Style.RESET_ALL}",
+        f"{bullet} Smart retry backoff & rate-limit handling",
+        f"{bullet} Optional file keyword search",
+        f"{bullet} Premium detection & dual export {Fore.LIGHTMAGENTA_EX}(> 50 GB){Style.RESET_ALL}",
+    ]
+
+    all_items = [title, link_line] + features
+    width = max(max(len(_strip_ansi(item)) for item in all_items) + 4, 56)
+
+    def center(text: str, w: int) -> str:
+        vlen = len(_strip_ansi(text))
+        pad_l = (w - vlen) // 2
+        pad_r = w - vlen - pad_l
+        return " " * pad_l + text + " " * pad_r
+
+    def left(text: str, w: int) -> str:
+        vlen = len(_strip_ansi(text))
+        return text + " " * (w - vlen)
+
+    if use_unicode:
+        c_tl, c_tr = "╭─", "─╮"
+        c_bl, c_br = "╰─", "─╯"
+        c_ml, c_mr = "├─", "─┤"
+        bar = "─"
+        wall = "│"
+    else:
+        c_tl, c_tr = "+-", "-+"
+        c_bl, c_br = "+-", "-+"
+        c_ml, c_mr = "+-", "-+"
+        bar = "-"
+        wall = "|"
+
+    lines = [
+        f"{border_color}{c_tl}" + bar * width + f"{c_tr}{Style.RESET_ALL}",
+        f"{border_color}{wall}{Style.RESET_ALL} {center(title, width)} {border_color}{wall}{Style.RESET_ALL}",
+        f"{border_color}{c_ml}" + bar * width + f"{c_mr}{Style.RESET_ALL}",
+    ]
+    for f in features:
+        lines.append(f"{border_color}{wall}{Style.RESET_ALL} {left(f, width)} {border_color}{wall}{Style.RESET_ALL}")
+
+    lines.append(f"{border_color}{c_ml}" + bar * width + f"{c_mr}{Style.RESET_ALL}")
+    lines.append(f"{border_color}{wall}{Style.RESET_ALL} {center(link_line, width)} {border_color}{wall}{Style.RESET_ALL}")
+    lines.append(f"{border_color}{c_bl}" + bar * width + f"{c_br}{Style.RESET_ALL}")
+
+    return "\n".join(lines)
+
+
 def print_logo():
-    logo = f"""
-{Fore.CYAN}
-    ╔══════════════════════════════════════════════════════╗
-    ║    {Fore.WHITE}MEGA.NZ ACCOUNT CHECKER v3.0 by Thomas Hermes{Fore.CYAN}     ║
-    ╠══════════════════════════════════════════════════════╣
-    ║  {Fore.GREEN}• Standalone MEGA API (zero bloat deps){Fore.CYAN}           ║
-    ║  {Fore.GREEN}• Proxy rotation (HTTP/SOCKS5){Fore.CYAN}                    ║
-    ║  {Fore.GREEN}• Asynchronous non-blocking engine{Fore.CYAN}                 ║
-    ║  {Fore.GREEN}• Smart retry with backoff{Fore.CYAN}                        ║
-    ║  {Fore.GREEN}• Keyword file search{Fore.CYAN}                             ║
-    ╚══════════════════════════════════════════════════════╝
-{Style.RESET_ALL}"""
+    """Print the startup banner with automatic encoding fallback."""
     try:
-        print(logo)
+        print("\n" + generate_banner(use_unicode=True) + "\n")
     except UnicodeEncodeError:
-        # Fallback to ASCII logo if UTF-8 is still failing
-        print("\n" + "="*54)
-        print("    MEGA.NZ ACCOUNT CHECKER v3.0 by Thomas Hermes")
-        print("="*54)
-        print("  * Standalone MEGA API")
-        print("  * Proxy rotation")
-        print("  * Asynchronous non-blocking engine")
-        print("="*54 + "\n")
+        print("\n" + generate_banner(use_unicode=False) + "\n")
 
 
 # ─── Title updater thread ─────────────────────────────────────
