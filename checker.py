@@ -486,8 +486,8 @@ def generate_banner(use_unicode: bool = True) -> str:
     remain strictly aligned across all lines.
     """
     border_color = Fore.CYAN
-    title = f"{Style.BRIGHT}{Fore.WHITE}MEGA.NZ ACCOUNT CHECKER v3.0{Style.RESET_ALL}"
-    link_line = f"{Fore.WHITE}GitHub: {Style.BRIGHT}{Fore.LIGHTCYAN_EX}https://github.com/ThomasAHermes{Style.RESET_ALL}"
+    title = f"{Style.BRIGHT}{Fore.WHITE}MEGA.NZ ACCOUNT CHECKER v3.0 by Thomas Hermes{Style.RESET_ALL}"
+    link_line = f"{Fore.WHITE}GitHub: {Style.BRIGHT}{Fore.LIGHTCYAN_EX}https://github.com/ThomasAHermes/mega-nz-checker-by-thomas-hermes{Style.RESET_ALL}"
 
     bullet = f"{Fore.GREEN}•{Style.RESET_ALL}" if use_unicode else "*"
     features = [
